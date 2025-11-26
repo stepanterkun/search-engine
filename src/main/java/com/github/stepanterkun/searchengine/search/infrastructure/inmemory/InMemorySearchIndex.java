@@ -61,8 +61,7 @@ public class InMemorySearchIndex implements SearchIndex {
         }
 
         /**
-         * Считает TF с учётом буста для title.
-         * Можно возвращать double, чтобы не терять точность.
+         * Calculates term frequency (TF) with an extra boost for the title.
          */
         double tf(double titleBoost) {
             return contentFreq + titleBoost * titleFreq;
