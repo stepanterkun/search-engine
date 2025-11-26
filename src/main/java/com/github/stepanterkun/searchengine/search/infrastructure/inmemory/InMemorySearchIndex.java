@@ -21,7 +21,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * In-memory implementation of {@link SearchIndex} using inverted index.
+ * In-memory implementation of {@link SearchIndex} using inverted indexContent.
  */
 @Component
 public class InMemorySearchIndex implements SearchIndex {
@@ -30,8 +30,8 @@ public class InMemorySearchIndex implements SearchIndex {
 
     private final DocumentRepository repository;
 
-    // term -> (documentId -> term frequency in this document)
-    private final Map<String, Map<Long, Integer>> index = new ConcurrentHashMap<>();
+    // term -> (documentId -> TermStats(title and content frequencies) )
+    private final Map<String, Map<Long, TermStats>> index = new ConcurrentHashMap<>();
 
     // documentId -> ownerId
     private final Map<Long, Long> owners = new ConcurrentHashMap<>();
@@ -40,8 +40,41 @@ public class InMemorySearchIndex implements SearchIndex {
         this.repository = documentRepository;
     }
 
+    private static final class TermStats {
+        private int titleFreq;
+        private int contentFreq;
+
+        void incTitle() {
+            titleFreq++;
+        }
+
+        void incContent() {
+            contentFreq++;
+        }
+
+        int getTitleFreq() {
+            return titleFreq;
+        }
+
+        int getContentFreq() {
+            return contentFreq;
+        }
+
+        /**
+         * Calculates term frequency (TF) with an extra boost for the title.
+         */
+        double tf(double titleBoost) {
+            return contentFreq + titleBoost * titleFreq;
+        }
+
+        boolean isEmpty() {
+            return contentFreq == 0 && titleFreq == 0;
+        }
+    }
+
+
     /**
-     * Build index for all documents on application startup.
+     * Build indexContent for all documents on application startup.
      */
     @EventListener(ApplicationReadyEvent.class)
     public void buildIndexOnStartup() {
@@ -58,42 +91,40 @@ public class InMemorySearchIndex implements SearchIndex {
     public List<DocumentSummary> search(Long ownerId, String query) {
         log.debug("Search documents: ownerId={}, originalQuery={}", ownerId, query);
 
+        // docId -> total score (sum of term frequencies)
+        Map<Long, Double> scores = new HashMap<>();
+
+        final int TITLE_BOOST = 3;
+
         String normalizedQuery = query == null ? "" : query.toLowerCase().trim();
         if (normalizedQuery.isEmpty()) { return List.of();}
-
         String[] tokens = normalizedQuery.split("\\W+");
 
-        // docId -> total score (sum of term frequencies)
-        Map<Long, Integer> scores = new HashMap<>();
-
         for (String token : tokens) {
-            if (token.isBlank()) {
-                continue;
-            }
+            if (token.isBlank()) continue;
 
-            Map<Long, Integer> docsIdsAndOccurrences = index.get(token);
-            if (docsIdsAndOccurrences == null) {
-                continue;
-            }
+            Map<Long, TermStats> docsIdsAndOccurrences = index.get(token);
+            if (docsIdsAndOccurrences == null) continue;
 
-            for (Map.Entry<Long, Integer> entry : docsIdsAndOccurrences.entrySet()) {
+
+            for (Map.Entry<Long, TermStats> entry : docsIdsAndOccurrences.entrySet()) {
                 Long docId = entry.getKey();
-                Integer count = entry.getValue();
-
                 Long owner = owners.get(docId);
-                if (owner == null || !owner.equals(ownerId)) {
-                    continue;
-                }
+                if (owner == null || !owner.equals(ownerId)) continue;
 
-                // increase score by term frequency in this document
-                scores.merge(docId, count, Integer::sum);
+                TermStats stats = entry.getValue();
+                double tf = stats.tf(TITLE_BOOST);
+                double idf = 1; // todo: implement idf feature
+                double termScore = tf * idf;
+
+                scores.merge(docId, termScore, Double::sum);
             }
         }
 
         // sort documents by score descending
         List<Long> sortedDocIds = scores.entrySet()
                                           .stream()
-                                          .sorted((a, b) -> Integer.compare(b.getValue(), a.getValue()))
+                                          .sorted((a, b) -> Double.compare(b.getValue(), a.getValue()))
                                           .map(Map.Entry::getKey)
                                           .toList();
 
@@ -125,30 +156,47 @@ public class InMemorySearchIndex implements SearchIndex {
             throw new IllegalArgumentException("Cannot index document with null id");
         }
 
+        owners.put(docId, document.getOwnerId());
+        removeFromIndexOnly(docId);
+
+        String title = document.getTitle();
+        if (title == null || title.isBlank()) {
+            throw new IllegalStateException("Cannot index document because of empty title.");
+        }
+        String[] titleTokens = title.toLowerCase().split("\\W+");
+
         String content = document.getContent();
         if (content == null || content.isBlank()) {
             throw new IllegalStateException("Cannot index document because of empty content.");
         }
+        String[] contentTokens = content.toLowerCase().split("\\W+");
 
-        owners.put(docId, document.getOwnerId());
-        removeFromIndexOnly(docId);
-
-        String[] tokens = content.toLowerCase().split("\\W+");
-
-        for (String token : tokens) {
-            if (token.isBlank()) {
+        for (String titleToken : titleTokens) {
+            if (titleToken.isBlank()) {
                 continue;
             }
 
             index
-                    .computeIfAbsent(token, w -> new ConcurrentHashMap<>())
-                    .merge(docId, 1, Integer::sum);
+                    .computeIfAbsent(titleToken, t -> new ConcurrentHashMap<>())
+                    .computeIfAbsent(docId, id -> new TermStats())
+                    .incTitle();
+        }
+
+        for (String contentToken : contentTokens) {
+            if (contentToken.isBlank()) {
+                continue;
+            }
+
+            index
+                    .computeIfAbsent(contentToken, t -> new ConcurrentHashMap<>())
+                    .computeIfAbsent(docId, id -> new TermStats())
+                    .incContent();
         }
     }
 
     @Override
     public void remove(Long documentId) {
-        log.debug("Remove document from index: id={}", documentId);
+        log.debug("Remove document from indexContent: id={}", documentId);
 
         if (documentId == null) {
             return;
@@ -162,7 +210,7 @@ public class InMemorySearchIndex implements SearchIndex {
 
     private void removeFromIndexOnly(Long documentId) {
         // iterate over all terms and remove this document id
-        for (Map<Long, Integer> docsAndOccurrences : index.values()) {
+        for (Map<Long, TermStats> docsAndOccurrences : index.values()) {
             docsAndOccurrences.remove(documentId);
         }
     }

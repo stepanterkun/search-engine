@@ -11,7 +11,7 @@ public record DocumentSummary(
         Long documentId,
         String documentTitle,
         DocumentStatus documentStatus,
-        int relevanceScore,
+        double relevanceScore,
         List<WordContextSnippet> wordSnippets
 ) {
 }
