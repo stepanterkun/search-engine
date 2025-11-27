@@ -13,7 +13,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.List;
 import java.util.Optional;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 /**
@@ -47,7 +47,6 @@ class InMemorySearchIndexTest {
 
     @Test
     void search_shouldReturnDocumentSummaryForOwner() {
-        // given
         Long ownerId = 42L;
         Long docId = 1L;
         String content = "Java search engine test content";
@@ -84,4 +83,105 @@ class InMemorySearchIndexTest {
         verifyNoMoreInteractions(repository);
     }
 
+    @Test
+    void search_whenNoDocs_shouldReturnEmptyList() {
+        Long ownerId = 123L;
+        Long doc1Id = 42L;
+        Long doc2Id = 52L;
+
+        Document doc1 = new Document(
+                doc1Id,
+                "Test title 1",
+                "Test containing word java 1. Spring",
+                ownerId,
+                DocumentStatus.READY
+        );
+
+        Document doc2 = new Document(
+                doc2Id,
+                "Test title 2",
+                "Test containing word java 2",
+                ownerId,
+                DocumentStatus.READY
+        );
+
+        searchIndex.index(doc1);
+        searchIndex.index(doc2);
+
+        when(repository.findByIdAndOwnerId(doc1Id, ownerId)).thenReturn(Optional.of(doc1));
+        // not needed, because this doc was sorted before calling repository
+        // when(repository.findByIdAndOwnerId(doc2Id, ownerId)).thenReturn(Optional.of(doc2));
+
+        List<DocumentSummary> result = searchIndex.search(ownerId, "Java spring");
+
+        assertThat(result)
+                .isNotNull()
+                .hasSize(1);
+
+        assertThat(result.get(0).relevanceScore())
+                .isEqualTo(Math.log(3.0 / 2.0)); // smoothed IDF: log((N + 1) / (df + 1))
+
+
+    }
+
+    @Test
+    void search_shouldUseIdfAndMinScoreToFilterLessRelevantDocs() {
+        Long ownerId = 42L;
+        Long doc1Id = 42L;
+        Long doc2Id = 52L;
+
+        Document doc1 = new Document(
+                doc1Id,
+                "Test title 1",
+                "Test containing word java 1. Spring",
+                ownerId,
+                DocumentStatus.READY
+        );
+
+        Document doc2 = new Document(
+                doc2Id,
+                "Test title 2",
+                "Test containing word java 2",
+                ownerId,
+                DocumentStatus.READY
+        );
+
+        searchIndex.index(doc1);
+        searchIndex.index(doc2);
+
+        when(repository.findByIdAndOwnerId(doc1Id, ownerId)).thenReturn(Optional.of(doc1));
+
+        // when search query is "Java spring":
+        // - term "java" gives idf = 0 (contains in both docs)
+        // - term "spring" contains only in doc1 → idf = log((N + 1) / (df + 1)) = log(3 / 2)
+        List<DocumentSummary> result = searchIndex.search(ownerId, "Java spring");
+
+        assertThat(result)
+                .isNotNull()
+                .hasSize(1);
+
+        DocumentSummary summary = result.get(0);
+
+        assertThat(summary.documentId()).isEqualTo(doc1Id);
+        assertThat(summary.documentTitle()).isEqualTo("Test title 1");
+        assertThat(summary.documentStatus()).isEqualTo(DocumentStatus.READY);
+
+        double expectedIdfSpring = Math.log(3.0 / 2.0); // smoothed IDF: log((N + 1) / (df + 1))
+
+        assertThat(summary.relevanceScore())
+                .isCloseTo(expectedIdfSpring, within(1e-9));
+
+        verify(repository).findByIdAndOwnerId(doc1Id, ownerId);
+        verifyNoMoreInteractions(repository);
+    }
+
+    @Test
+    void search_whenNoDocsForOwner_shouldReturnEmptyList() {
+        Long ownerId = 123L;
+
+        List<DocumentSummary> result = searchIndex.search(ownerId, "java");
+
+        assertThat(result).isEmpty();
+        verifyNoInteractions(repository);
+    }
 }

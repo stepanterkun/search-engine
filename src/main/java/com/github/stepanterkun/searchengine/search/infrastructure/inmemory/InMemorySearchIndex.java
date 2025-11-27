@@ -21,12 +21,16 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * In-memory implementation of {@link SearchIndex} using inverted indexContent.
+ * In-memory implementation of {@link SearchIndex} using inverted index.
  */
 @Component
 public class InMemorySearchIndex implements SearchIndex {
 
     private static final Logger log = LoggerFactory.getLogger(InMemorySearchIndex.class);
+
+    // do not show documents with relevance score below MIN_SCORE
+    private static final double MIN_SCORE = 0.1;
+    private static final double TITLE_BOOST = 3.0;
 
     private final DocumentRepository repository;
 
@@ -52,23 +56,11 @@ public class InMemorySearchIndex implements SearchIndex {
             contentFreq++;
         }
 
-        int getTitleFreq() {
-            return titleFreq;
-        }
-
-        int getContentFreq() {
-            return contentFreq;
-        }
-
         /**
          * Calculates term frequency (TF) with an extra boost for the title.
          */
         double tf(double titleBoost) {
             return contentFreq + titleBoost * titleFreq;
-        }
-
-        boolean isEmpty() {
-            return contentFreq == 0 && titleFreq == 0;
         }
     }
 
@@ -94,11 +86,16 @@ public class InMemorySearchIndex implements SearchIndex {
         // docId -> total score (sum of term frequencies)
         Map<Long, Double> scores = new HashMap<>();
 
-        final int TITLE_BOOST = 3;
-
-        String normalizedQuery = query == null ? "" : query.toLowerCase().trim();
+        String normalizedQuery = query == null ? "" : query.trim();
         if (normalizedQuery.isEmpty()) { return List.of();}
-        String[] tokens = normalizedQuery.split("\\W+");
+
+        String[] rawTokens = normalizedQuery.split("\\W+");
+
+        List<String> tokens = Arrays.stream(rawTokens)
+                                      .map(String::toLowerCase)
+                                      .filter(t -> !t.isBlank())
+                                      .distinct()
+                                      .toList();
 
         for (String token : tokens) {
             if (token.isBlank()) continue;
@@ -106,6 +103,7 @@ public class InMemorySearchIndex implements SearchIndex {
             Map<Long, TermStats> docsIdsAndOccurrences = index.get(token);
             if (docsIdsAndOccurrences == null) continue;
 
+            double idf = computeIdf(token);
 
             for (Map.Entry<Long, TermStats> entry : docsIdsAndOccurrences.entrySet()) {
                 Long docId = entry.getKey();
@@ -114,7 +112,6 @@ public class InMemorySearchIndex implements SearchIndex {
 
                 TermStats stats = entry.getValue();
                 double tf = stats.tf(TITLE_BOOST);
-                double idf = 1; // todo: implement idf feature
                 double termScore = tf * idf;
 
                 scores.merge(docId, termScore, Double::sum);
@@ -124,6 +121,7 @@ public class InMemorySearchIndex implements SearchIndex {
         // sort documents by score descending
         List<Long> sortedDocIds = scores.entrySet()
                                           .stream()
+                                          .filter(entry -> entry.getValue() >= MIN_SCORE)
                                           .sorted((a, b) -> Double.compare(b.getValue(), a.getValue()))
                                           .map(Map.Entry::getKey)
                                           .toList();
@@ -133,8 +131,8 @@ public class InMemorySearchIndex implements SearchIndex {
                        .stream()
                        .map(id -> {
                            Document doc = repository
-                                                  .findByIdAndOwnerId(id, ownerId)
-                                                  .orElseThrow(() -> new DocumentNotFoundException(id));
+                                        .findByIdAndOwnerId(id, ownerId)
+                                        .orElseThrow(() -> new DocumentNotFoundException(id));
 
                            return new DocumentSummary(
                                    id,
@@ -215,7 +213,7 @@ public class InMemorySearchIndex implements SearchIndex {
         }
     }
 
-    private List<WordContextSnippet> buildWordSnippets(Document doc, String[] queryTokens) {
+    private List<WordContextSnippet> buildWordSnippets(Document doc, List<String> queryTokens) {
         String content = doc.getContent();
         if (content == null || content.isBlank()) {
             return List.of();
@@ -224,7 +222,7 @@ public class InMemorySearchIndex implements SearchIndex {
         String lowerContent = content.toLowerCase();
 
         // take unique non-blank tokens from query
-        List<String> uniqueTokens = Arrays.stream(queryTokens)
+        List<String> uniqueTokens = queryTokens.stream()
                                             .map(String::toLowerCase)
                                             .filter(token -> !token.isBlank())
                                             .distinct()
@@ -313,5 +311,35 @@ public class InMemorySearchIndex implements SearchIndex {
 
         // no sentence boundary in range -> keep rough end
         return roughEnd;
+    }
+
+    /**
+     * Calculates a smoothed IDF value for the given token.
+     * <p>
+     * IDF reflects how rare a term is across all indexed documents.
+     * If there is only one document in the index, we return 1.0 so that
+     * plain TF remains the main ranking signal.
+     * <p>
+     * Formula (with smoothing): log((N + 1) / (df + 1))
+     *   N  — total number of documents in the index
+     *   df — number of documents containing the token
+     */
+    private double computeIdf(String token) {
+        int totalDocs = owners.size();
+        if (totalDocs <= 1) {
+            // not enough data for meaningful IDF – fall back to plain TF
+            return 1.0;
+        }
+
+        Map<Long, TermStats> docsWithToken = index.get(token);
+        int df = (docsWithToken == null) ? 0 : docsWithToken.size();
+
+        if (df == 0) {
+            // token never occurs: it shouldn't affect scoring
+            return 0.0;
+        }
+
+        // smoothed IDF: log((N + 1) / (df + 1))
+        return Math.log((double) (totalDocs + 1) / (df + 1));
     }
 }
