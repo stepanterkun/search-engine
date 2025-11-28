@@ -2,7 +2,9 @@ package com.github.stepanterkun.searchengine.search.api.controller;
 
 import com.github.stepanterkun.searchengine.search.api.dto.SearchResultDto;
 import com.github.stepanterkun.searchengine.search.domain.service.SearchService;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.PositiveOrZero;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -33,11 +35,13 @@ public class SearchController {
     @GetMapping("/all")
     public ResponseEntity<SearchResultDto> searchAllDocuments(
             @RequestHeader("X-User-Id") @NotNull Long ownerId,
-            @RequestParam("query") @NotNull String query
+            @RequestParam("query") @NotNull String query,
+            @RequestParam(name = "page", required = false) Integer page,
+            @RequestParam(name = "size", required = false) Integer size
     ) {
         log.info("Search documents: ownerId={}, query='{}'", ownerId, query);
 
-        SearchResultDto result = service.searchAllDocumentsByQuery(ownerId, query);
+        SearchResultDto result = service.searchAllDocumentsByQuery(ownerId, query, page, size);
         return ResponseEntity.ok(result);
     }
 }

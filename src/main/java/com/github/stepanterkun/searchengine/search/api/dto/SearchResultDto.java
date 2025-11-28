@@ -9,6 +9,12 @@ import java.util.List;
  */
 public record SearchResultDto(
         String originalQuery,
+        int page, // 1-based indexation
+        int size,
+        long totalElements,
+        int totalPages,
+        boolean hasPrevious,
+        boolean hasNext,
         List<DocumentSummary> documentSummaries
-) {
+        ) {
 }
