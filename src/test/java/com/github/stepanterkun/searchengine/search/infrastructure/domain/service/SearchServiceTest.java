@@ -10,6 +10,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -27,7 +31,7 @@ public class SearchServiceTest {
     @InjectMocks
     SearchService service;
 
-    private List<DocumentSummary> summariesList(int amount) {
+    private List<DocumentSummary> generateSummaries(int amount) {
         List<DocumentSummary> summaries = new ArrayList<>(amount);
 
         for (long id = 1; id <= amount; id++) {
@@ -52,14 +56,20 @@ public class SearchServiceTest {
         Long ownerId = 42L;
         String query = "java";
 
-        List<DocumentSummary> all = summariesList(12);
+        List<DocumentSummary> all = generateSummaries(12); // ids 1..12
 
-        when(searchIndex.search(ownerId, query)).thenReturn(all);
+        int pageNumber = 2; // 1-based
+        int pageSize = 5;
 
-        int page = 2;
-        int size = 5;
+        Pageable pageable = PageRequest.of(pageNumber - 1, pageSize); // page=1 (0-based)
 
-        SearchResultDto result = service.searchAllDocumentsByQuery(ownerId, query, page, size);
+        // content for 2nd page: id 6..10
+        List<DocumentSummary> pageContent = all.subList(5, 10);
+        Page<DocumentSummary> page = new PageImpl<>(pageContent, pageable, all.size());
+
+        when(searchIndex.search(ownerId, query, pageable)).thenReturn(page);
+
+        SearchResultDto result = service.searchAllDocumentsByQuery(ownerId, query, pageNumber, pageSize);
 
         assertThat(result)
                 .isNotNull()
@@ -73,19 +83,21 @@ public class SearchServiceTest {
                         SearchResultDto::hasNext
                 ).containsExactly(
                         query,
-                        page,
-                        size,
+                        pageNumber,
+                        pageSize,
                         12L,
                         3,
                         true, // hasPrevious
                         true  // hasNext
                 );
 
-        assertThat(result.documentSummaries().size()).isEqualTo(5);
-        assertThat(result.documentSummaries().get(0).documentId()).isEqualTo(summary(6L).documentId());
-        assertThat(result.documentSummaries().get(4).documentId()).isEqualTo(summary(10L).documentId());
+        assertThat(result.documentSummaries()).hasSize(5);
+        assertThat(result.documentSummaries().get(0).documentId())
+                .isEqualTo(all.get(5).documentId()); // id=6
+        assertThat(result.documentSummaries().get(4).documentId())
+                .isEqualTo(all.get(9).documentId()); // id=10
 
-        verify(searchIndex).search(ownerId, query);
+        verify(searchIndex).search(ownerId, query, pageable);
         verifyNoMoreInteractions(searchIndex);
     }
 
@@ -94,12 +106,30 @@ public class SearchServiceTest {
         Long ownerId = 42L;
         String query = "java";
 
-        List<DocumentSummary> all = summariesList(12);
-
-        when(searchIndex.search(ownerId, query)).thenReturn(all);
+        List<DocumentSummary> all = generateSummaries(12);
 
         int wrongPage = 50;
         int size = 5;
+
+        // первый запрос: очень большая страница, контент пустой, но totalElements известен
+        Pageable wrongPageable = PageRequest.of(wrongPage - 1, size); // 49
+        Page<DocumentSummary> emptyPage = new PageImpl<>(
+                List.of(),
+                wrongPageable,
+                all.size() // 12 документов всего
+        );
+
+        // второй запрос: последняя страница (3-я, 0-based = 2), документы 11 и 12
+        Pageable lastPageable = PageRequest.of(2, size);
+        List<DocumentSummary> lastPageContent = all.subList(10, 12);
+        Page<DocumentSummary> lastPage = new PageImpl<>(
+                lastPageContent,
+                lastPageable,
+                all.size()
+        );
+
+        when(searchIndex.search(ownerId, query, wrongPageable)).thenReturn(emptyPage);
+        when(searchIndex.search(ownerId, query, lastPageable)).thenReturn(lastPage);
 
         SearchResultDto result = service.searchAllDocumentsByQuery(ownerId, query, wrongPage, size);
 
@@ -115,7 +145,7 @@ public class SearchServiceTest {
                         SearchResultDto::hasNext
                 ).containsExactly(
                         query,
-                        3,
+                        3,      // перелистнули на последнюю страницу
                         size,
                         12L,
                         3,
@@ -123,14 +153,14 @@ public class SearchServiceTest {
                         false   // hasNext
                 );
 
-        // last page should contain only 11 and 12 docs
-        assertThat(result.documentSummaries().size()).isEqualTo(2);
+        assertThat(result.documentSummaries()).hasSize(2);
         assertThat(result.documentSummaries().get(0).documentId())
-                .isEqualTo(summary(11L).documentId());
+                .isEqualTo(all.get(10).documentId()); // id=11
         assertThat(result.documentSummaries().get(1).documentId())
-                .isEqualTo(summary(12L).documentId());
+                .isEqualTo(all.get(11).documentId()); // id=12
 
-        verify(searchIndex).search(ownerId, query);
+        verify(searchIndex).search(ownerId, query, wrongPageable);
+        verify(searchIndex).search(ownerId, query, lastPageable);
         verifyNoMoreInteractions(searchIndex);
     }
 
@@ -139,12 +169,14 @@ public class SearchServiceTest {
         Long ownerId = 42L;
         String query = "java";
 
-        List<DocumentSummary> all = summariesList(3); // all docs on one default page
+        List<DocumentSummary> all = generateSummaries(3);
+        Pageable pageable = PageRequest.of(0, 20);
+        Page<DocumentSummary> page = new PageImpl<>(all, pageable, all.size());
 
-        when(searchIndex.search(ownerId, query)).thenReturn(all);
+        when(searchIndex.search(ownerId, query, pageable)).thenReturn(page);
 
-        Integer wrongPage = 0;    // должен стать PAGE_DEFAULT = 1
-        Integer wrongSize = -10;  // должен стать SIZE_DEFAULT = 20
+        Integer wrongPage = 0;
+        Integer wrongSize = -10;
 
         SearchResultDto result = service.searchAllDocumentsByQuery(ownerId, query, wrongPage, wrongSize);
 
@@ -163,7 +195,7 @@ public class SearchServiceTest {
                         1,      // PAGE_DEFAULT
                         20,     // SIZE_DEFAULT
                         3L,
-                        1,
+                        1,      // totalPages = 1
                         false,
                         false
                 );
@@ -174,18 +206,24 @@ public class SearchServiceTest {
         assertThat(result.documentSummaries().get(2).documentId())
                 .isEqualTo(summary(3L).documentId());
 
-        verify(searchIndex).search(ownerId, query);
+        verify(searchIndex).search(ownerId, query, pageable);
         verifyNoMoreInteractions(searchIndex);
     }
+
 
     @Test
     void searchAllDocumentsByQuery_whenEmptyElements_shouldReturnEmptyList() {
         Long ownerId = 42L;
         String query = "java";
 
-        when(searchIndex.search(ownerId, query)).thenReturn(List.of());
+        int defaultPage = 1;
+        int defaultSize = 20;
 
-        // page and size = null => implement defaults (1 and 20)
+        Pageable pageable = PageRequest.of(defaultPage - 1, defaultSize); // 0,20
+        Page<DocumentSummary> emptyPage = Page.empty(pageable);
+
+        when(searchIndex.search(ownerId, query, pageable)).thenReturn(emptyPage);
+
         SearchResultDto result = service.searchAllDocumentsByQuery(ownerId, query, null, null);
 
         assertThat(result)
@@ -204,13 +242,13 @@ public class SearchServiceTest {
                         20,
                         0L,
                         0,
-                        false, // hasPrevious
-                        false  // hasNext
+                        false,
+                        false
                 );
 
         assertThat(result.documentSummaries()).isEmpty();
 
-        verify(searchIndex).search(ownerId, query);
+        verify(searchIndex).search(ownerId, query, pageable);
         verifyNoMoreInteractions(searchIndex);
     }
 }

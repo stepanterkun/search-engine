@@ -11,14 +11,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.stereotype.Component;
 
+import org.springframework.data.domain.Pageable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+
+import static java.util.stream.Collectors.toList;
 
 /**
  * In-memory implementation of {@link SearchIndex} using inverted index.
@@ -80,14 +85,14 @@ public class InMemorySearchIndex implements SearchIndex {
     }
 
     @Override
-    public List<DocumentSummary> search(Long ownerId, String query) {
+    public Page<DocumentSummary> search(Long ownerId, String query, Pageable pageable) {
         log.debug("Search documents: ownerId={}, originalQuery={}", ownerId, query);
 
         // docId -> total score (sum of term frequencies)
         Map<Long, Double> scores = new HashMap<>();
 
         String normalizedQuery = query == null ? "" : query.trim();
-        if (normalizedQuery.isEmpty()) { return List.of();}
+        if (normalizedQuery.isEmpty()) { return Page.empty(); }
 
         String[] rawTokens = normalizedQuery.split("\\W+");
 
@@ -118,31 +123,36 @@ public class InMemorySearchIndex implements SearchIndex {
             }
         }
 
-        // sort documents by score descending
-        List<Long> sortedDocIds = scores.entrySet()
-                                          .stream()
-                                          .filter(entry -> entry.getValue() >= MIN_SCORE)
-                                          .sorted((a, b) -> Double.compare(b.getValue(), a.getValue()))
-                                          .map(Map.Entry::getKey)
-                                          .toList();
+        List<Long> filteredDocIds = scores.entrySet()
+                                            .stream()
+                                            .filter(entry -> entry.getValue() >= MIN_SCORE)
+                                            .map(Map.Entry::getKey)
+                                            .toList();
 
-        // build summaries for each document
-        return sortedDocIds
-                       .stream()
-                       .map(id -> {
-                           Document doc = repository
-                                        .findByIdAndOwnerId(id, ownerId)
-                                        .orElseThrow(() -> new DocumentNotFoundException(id));
+        int totalElements = filteredDocIds.size(); // this is the number of docs that match the query
 
-                           return new DocumentSummary(
-                                   id,
-                                   doc.getTitle(),
-                                   doc.getStatus(),
-                                   scores.get(id),
-                                   buildWordSnippets(doc, tokens)
-                           );
-                       })
-                       .toList();
+        int start = Math.min(pageable.getPageNumber() * pageable.getPageSize(), filteredDocIds.size());
+        int end = Math.min((pageable.getPageNumber() + 1) * pageable.getPageSize(), filteredDocIds.size());
+
+        List<Long> pagedDocIds = filteredDocIds.subList(start, end);
+
+        List<DocumentSummary> documentSummaries = pagedDocIds.stream()
+                                    .map(id -> {
+                                        Document doc = repository
+                                            .findByIdAndOwnerId(id, ownerId)
+                                            .orElseThrow(() -> new DocumentNotFoundException(id));
+
+                                            return new DocumentSummary(
+                                                    id,
+                                                    doc.getTitle(),
+                                                    doc.getStatus(),
+                                                    scores.get(id),
+                                                    buildWordSnippets(doc, tokens)
+                                            );
+                                    })
+                                    .toList();
+
+        return new PageImpl<>(documentSummaries, pageable, totalElements);
     }
 
     @Override

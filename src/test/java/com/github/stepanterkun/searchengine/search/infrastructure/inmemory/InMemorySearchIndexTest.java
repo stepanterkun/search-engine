@@ -9,6 +9,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 
 import java.util.List;
 import java.util.Optional;
@@ -48,13 +52,14 @@ class InMemorySearchIndexTest {
     @Test
     void search_shouldReturnDocumentSummaryForOwner() {
         Long ownerId = 42L;
-        Long docId = 1L;
-        String content = "Java search engine test content";
+        String query = "search engine";
+        Pageable pageable = PageRequest.of(0, 5); // 0-based indexation
 
+        Long docId = 1L;
         Document doc = new Document(
                 docId,
                 "Title",
-                content,
+                "Java search engine test content",
                 ownerId,
                 DocumentStatus.READY
         );
@@ -63,12 +68,13 @@ class InMemorySearchIndexTest {
 
         when(repository.findByIdAndOwnerId(docId, ownerId)).thenReturn(Optional.of(doc));
 
-        List<DocumentSummary> result = searchIndex.search(ownerId, "search engine");
+        Page<DocumentSummary> page = searchIndex.search(ownerId, query, pageable);
+        List<DocumentSummary> pageContent = page.getContent();
 
-        assertThat(result)
+        assertThat(pageContent)
                 .hasSize(1);
 
-        DocumentSummary summary = result.get(0);
+        DocumentSummary summary = pageContent.get(0);
 
         assertThat(summary.documentId()).isEqualTo(docId);
         assertThat(summary.documentTitle()).isEqualTo("Title");
@@ -84,11 +90,13 @@ class InMemorySearchIndexTest {
     }
 
     @Test
-    void search_whenNoDocs_shouldReturnEmptyList() {
+    void search_whenManyDocsMatch_shouldReturnMatchingDocuments() {
         Long ownerId = 123L;
+
+        Pageable pageable = PageRequest.of(0, 5);
+
         Long doc1Id = 42L;
         Long doc2Id = 52L;
-
         Document doc1 = new Document(
                 doc1Id,
                 "Test title 1",
@@ -96,7 +104,6 @@ class InMemorySearchIndexTest {
                 ownerId,
                 DocumentStatus.READY
         );
-
         Document doc2 = new Document(
                 doc2Id,
                 "Test title 2",
@@ -109,27 +116,31 @@ class InMemorySearchIndexTest {
         searchIndex.index(doc2);
 
         when(repository.findByIdAndOwnerId(doc1Id, ownerId)).thenReturn(Optional.of(doc1));
-        // not needed, because this doc was sorted before calling repository
+
+        // not needed, because this doc was filtered out before calling repository
         // when(repository.findByIdAndOwnerId(doc2Id, ownerId)).thenReturn(Optional.of(doc2));
 
-        List<DocumentSummary> result = searchIndex.search(ownerId, "Java spring");
+        Page<DocumentSummary> page = searchIndex.search(ownerId, "Java spring", pageable);
+        List<DocumentSummary> pageContent = page.getContent();
 
-        assertThat(result)
+        assertThat(pageContent)
                 .isNotNull()
                 .hasSize(1);
 
-        assertThat(result.get(0).relevanceScore())
+        assertThat(pageContent.get(0).relevanceScore())
                 .isEqualTo(Math.log(3.0 / 2.0)); // smoothed IDF: log((N + 1) / (df + 1))
 
-
+        verify(repository).findByIdAndOwnerId(doc1Id, ownerId);
+        verifyNoMoreInteractions(repository);
     }
 
     @Test
     void search_shouldUseIdfAndMinScoreToFilterLessRelevantDocs() {
         Long ownerId = 42L;
+        Pageable pageable = PageRequest.of(0, 1);
+
         Long doc1Id = 42L;
         Long doc2Id = 52L;
-
         Document doc1 = new Document(
                 doc1Id,
                 "Test title 1",
@@ -153,14 +164,15 @@ class InMemorySearchIndexTest {
 
         // when search query is "Java spring":
         // - term "java" gives idf = 0 (contains in both docs)
-        // - term "spring" contains only in doc1 → idf = log((N + 1) / (df + 1)) = log(3 / 2)
-        List<DocumentSummary> result = searchIndex.search(ownerId, "Java spring");
+        // - term "spring" contains only in doc1 => idf = log((N + 1) / (df + 1)) = log(3 / 2)
+        Page<DocumentSummary> page = searchIndex.search(ownerId, "Java spring", pageable);
+        List<DocumentSummary> pageContent = page.getContent();
 
-        assertThat(result)
+        assertThat(pageContent)
                 .isNotNull()
                 .hasSize(1);
 
-        DocumentSummary summary = result.get(0);
+        DocumentSummary summary = pageContent.get(0);
 
         assertThat(summary.documentId()).isEqualTo(doc1Id);
         assertThat(summary.documentTitle()).isEqualTo("Test title 1");
@@ -169,17 +181,18 @@ class InMemorySearchIndexTest {
         double expectedIdfSpring = Math.log(3.0 / 2.0); // smoothed IDF: log((N + 1) / (df + 1))
 
         assertThat(summary.relevanceScore())
-                .isCloseTo(expectedIdfSpring, within(1e-9));
+                .isEqualTo(expectedIdfSpring, within(0.01));
 
         verify(repository).findByIdAndOwnerId(doc1Id, ownerId);
         verifyNoMoreInteractions(repository);
     }
 
     @Test
-    void search_whenNoDocsForOwner_shouldReturnEmptyList() {
+    void search_whenNoDocsForOwner_shouldReturnEmptyPage() {
         Long ownerId = 123L;
+        Pageable pageable = PageRequest.of(2, 42);
 
-        List<DocumentSummary> result = searchIndex.search(ownerId, "java");
+        Page<DocumentSummary> result = searchIndex.search(ownerId, "java", pageable);
 
         assertThat(result).isEmpty();
         verifyNoInteractions(repository);

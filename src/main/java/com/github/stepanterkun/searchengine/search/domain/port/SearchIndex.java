@@ -3,6 +3,9 @@ package com.github.stepanterkun.searchengine.search.domain.port;
 import com.github.stepanterkun.searchengine.document.domain.model.Document;
 import com.github.stepanterkun.searchengine.search.domain.model.DocumentSummary;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import java.util.List;
 
 /**
@@ -26,9 +29,10 @@ public interface SearchIndex {
     /**
      * Search documents of a specific owner by text query.
      *
-     * @param ownerId id of the owner
-     * @param query   free text query
-     * @return list of document summaries ordered by relevance
+     * @param ownerId  id of the owner
+     * @param query    free text query
+     * @param pageable pagination information (zero-based page index and page size)
+     * @return page of document summaries ordered by relevance
      */
-    List<DocumentSummary> search(Long ownerId, String query);
+    Page<DocumentSummary> search(Long ownerId, String query, Pageable pageable);
 }
