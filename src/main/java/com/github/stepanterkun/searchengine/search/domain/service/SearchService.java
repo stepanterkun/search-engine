@@ -5,9 +5,11 @@ import com.github.stepanterkun.searchengine.search.domain.model.DocumentSummary;
 import com.github.stepanterkun.searchengine.search.domain.port.SearchIndex;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -30,44 +32,47 @@ public class SearchService {
     /**
      * Searches all documents of a given owner by the query string.
      */
-    public SearchResultDto searchAllDocumentsByQuery(Long ownerId, String query, Integer page, Integer size) {
-        log.debug("Search started: ownerId={}, originalQuery='{}', page={}, size={}", ownerId, query, page, size);
+    public SearchResultDto searchAllDocumentsByQuery(Long ownerId, String query, Integer pageNumber, Integer pageSize) {
+        log.debug("Search started: ownerId={}, originalQuery='{}', pageNumber={}, pageSize={}",
+                ownerId, query, pageNumber, pageSize);
 
-        page = (page == null || page < 1) ? PAGE_DEFAULT : page;
-        size = (size == null || size < 1) ? SIZE_DEFAULT : size;
+        pageNumber = (pageNumber == null || pageNumber < 1) ? PAGE_DEFAULT : pageNumber;
+        pageSize = (pageSize == null || pageSize < 1) ? SIZE_DEFAULT : pageSize;
 
-        List<DocumentSummary> allSummaries = searchIndex.search(ownerId, query);
-        int totalElements = allSummaries.size();
+        Pageable pageable = PageRequest.of(pageNumber - 1, pageSize);
+        Page<DocumentSummary> page = searchIndex.search(ownerId, query, pageable);
 
-        if (totalElements == 0) {
+        long totalElements = page.getTotalElements();
+        int totalPages = page.getTotalPages();
+
+        if (totalElements == 0L) {
             return new SearchResultDto(
                     query,
-                    page,
-                    size,
+                    pageNumber,
+                    pageSize,
                     0L,
                     0,
                     false,
                     false,
                     List.of()
-                    );
+            );
         }
 
-        int totalPages = (int) Math.ceil((double) totalElements / size);
+        if (pageNumber > totalPages) {
+            pageNumber = totalPages;
+            pageable = PageRequest.of(pageNumber - 1, pageSize);
+            page = searchIndex.search(ownerId, query, pageable);
+        }
 
-        int effectivePage = Math.min(page, totalPages);
+        boolean hasPrevious = page.hasPrevious();
+        boolean hasNext = page.hasNext();
 
-        int fromIndex = (effectivePage - 1) * size;
-        int toIndex = Math.min(fromIndex + size, totalElements);
-
-        List<DocumentSummary> pageContent = allSummaries.subList(fromIndex, toIndex);
-
-        boolean hasPrevious = effectivePage > 1;
-        boolean hasNext = effectivePage < totalPages;
+        List<DocumentSummary> pageContent = page.getContent();
 
         return new SearchResultDto(
                 query,
-                effectivePage,
-                size,
+                pageNumber,
+                pageSize,
                 totalElements,
                 totalPages,
                 hasPrevious,
